@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Extractor": {
+      "commandName": "Project",
+      "commandLineArgs": "..\\..\\..\\..\\..\\before\\IL2C.Core.Test.ILConverters.dll ..\\..\\..\\..\\..\\merged\\IL2C.Core.Test.ILConverters.dll ..\\..\\..\\..\\..\\..\\IL2C\\tests\\IL2C.Core.Test.ILConverters output"
+    }
+  }
+}
