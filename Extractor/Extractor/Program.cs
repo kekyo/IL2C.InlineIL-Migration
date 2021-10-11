@@ -19,14 +19,17 @@
 
 using Mono.Cecil;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace Extractor
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             // ..\..\..\..\..\before\IL2C.Core.Test.ILConverters.dll
             // ..\..\..\..\..\merged\IL2C.Core.Test.ILConverters.dll
@@ -86,11 +89,83 @@ namespace Extractor
             //    ToArray();
 
             var targetMergedMethods = targetBeforeMethods.
-                Select(m => (before: m, merged: mergedMethods[m.FullName])).
-                ToArray();
+                Select(m => mergedMethods[m.FullName]).
+                GroupBy(m => m.DeclaringType.Name).
+                ToDictionary(g => g.Key, g => g.ToDictionary(m => m.Name));
 
-            // Step 3: Patch source code.
+            // Step 3: Read all source code.
+            var sourceCodes = await Task.WhenAll(
+                Directory.EnumerateFiles(
+                    il2cSourceBasePath, "*.cs", SearchOption.AllDirectories).
+                Select(async path =>
+                {
+                    var sourceCode = await File.ReadAllTextAsync(path, Encoding.UTF8);
+                    var testCaseIndex = sourceCode.IndexOf("[TestCase(");
+                    var testClassIndex = sourceCode.IndexOf("class ", testCaseIndex + 1);
+                    var testClassNameStartIndex = testClassIndex + 6;
+                    var testClassNameEndIndex = sourceCode.IndexOfAny(new[] { ' ', '\t', '\r', '\n' }, testClassNameStartIndex);
+                    var testClassName = sourceCode.Substring(testClassNameStartIndex, testClassNameEndIndex - testClassNameStartIndex);
+                    var testClassBodyIndex = sourceCode.IndexOf('{', testClassNameEndIndex + 1);
+                    return (relativePath: path.Substring(il2cSourceBasePath.Length + 1), testClassName, index: testClassBodyIndex + 1, sourceCode);
+                }));
 
+            // Step 4: Patch source code.
+            var a = sourceCodes.Select(entry =>
+            {
+                var methods = targetMergedMethods[entry.testClassName];
+
+                var forwardRefLine = "[MethodImpl(MethodImplOptions.ForwardRef)]";
+                var staticExternWord = " static extern ";
+
+                var sb = new StringBuilder(entry.sourceCode.Substring(0, entry.index));
+                var index = entry.index;
+                while (true)
+                {
+                    var forwardRefIndex = entry.sourceCode.IndexOf(forwardRefLine, index);
+                    if (forwardRefIndex == -1)
+                    {
+                        break;
+                    }
+
+                    var externIndex = entry.sourceCode.IndexOf(staticExternWord, forwardRefIndex + forwardRefLine.Length);
+
+                    var returnTypeEndIndex = entry.sourceCode.IndexOf(" ", externIndex + staticExternWord.Length);
+                    var methodNameEndIndex = entry.sourceCode.IndexOf("(", returnTypeEndIndex + 1);
+
+                    var methodName = entry.sourceCode.Substring(
+                        returnTypeEndIndex, methodNameEndIndex - returnTypeEndIndex);
+
+                    var signatureEndIndex = entry.sourceCode.IndexOf(");", returnTypeEndIndex + methodName.Length + 1);
+
+                    var signatureHead = entry.sourceCode.Substring(
+                        forwardRefIndex + forwardRefLine.Length, externIndex - forwardRefIndex - forwardRefLine.Length);
+                    sb.Append(signatureHead);
+                    sb.Append(" static ");
+
+                    var signature = entry.sourceCode.Substring(
+                        externIndex + staticExternWord.Length, signatureEndIndex - (externIndex + staticExternWord.Length));
+                    sb.Append(signature);
+                    sb.AppendLine(")");
+                    sb.Append("        {");
+
+                    var body = methods[methodName.Trim()].Body;
+
+                    foreach (var instruction in body.Instructions)
+                    {
+                        sb.AppendFormat("            {0}({1});", instruction.OpCode, instruction.Operand);
+                        sb.AppendLine();
+                    }
+
+                    sb.AppendLine("            return default;");
+                    sb.Append("        }");
+
+                    index = signatureEndIndex + 2;
+                }
+
+                sb.Append(entry.sourceCode.Substring(index));
+
+                return sb.ToString();
+            }).ToArray();
         }
     }
 }
